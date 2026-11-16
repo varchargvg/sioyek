@@ -1,0 +1,75 @@
+name: Build Sioyek Android APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK & NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'tools platform-tools platforms;android-34 build-tools;34.0.0 ndk;26.1.10909125'
+
+      - name: Install Qt 6.8 for Android
+        id: install-qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: 'linux'
+          target: 'android'
+          arch: 'android_arm64_v8a'
+
+      - name: Install host Qt for desktop tools
+        id: install-qt-host
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: 'linux'
+          target: 'desktop'
+          arch: 'linux_gcc_64'
+
+      - name: Cross-compile MuPDF for Android (arm64-v8a)
+        run: |
+          cd mupdf
+          make generate
+          export NDK=${ANDROID_SDK_ROOT}/ndk/26.1.10909125
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          make OS=android \
+               CC=$TOOLCHAIN/bin/aarch64-linux-android26-clang \
+               CXX=$TOOLCHAIN/bin/aarch64-linux-android26-clang++ \
+               AR=$TOOLCHAIN/bin/llvm-ar \
+               RANLIB=$TOOLCHAIN/bin/llvm-ranlib \
+               HAVE_X11=no HAVE_GLUT=no HAVE_CURL=no \
+               build=release libs -j$(nproc)
+
+      - name: Configure and Build APK
+        env:
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.1.10909125
+        run: |
+          mkdir build && cd build
+          ${{ steps.install-qt.outputs.qt-root-dir }}/bin/qt-cmake .. \
+            -DQT_HOST_PATH=${{ steps.install-qt-host.outputs.qt-root-dir }} \
+            -DANDROID_SDK_ROOT=${ANDROID_SDK_ROOT} \
+            -DANDROID_NDK_ROOT=${ANDROID_NDK_ROOT} \
+            -DANDROID_ABI=arm64-v8a \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build . --target apk -j$(nproc)
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sioyek-android-arm64
+          path: build/android-build/build/outputs/apk/**/*.apk
