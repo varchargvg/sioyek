@@ -2,6 +2,9 @@ name: Build Sioyek Android APK
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-android.yml'
 
 jobs:
   build-apk:
@@ -41,7 +44,7 @@ jobs:
           target: 'desktop'
           arch: 'linux_gcc_64'
 
-      - name: Cross-compile MuPDF for Android (arm64-v8a)
+      - name: Cross-compile MuPDF for Android
         run: |
           cd mupdf
           make generate
