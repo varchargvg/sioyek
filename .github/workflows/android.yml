@@ -1,0 +1,187 @@
+
+name: Build Sioyek Android
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    name: Build Android ARM64 APK
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    env:
+      QT_VERSION: "6.7.2"
+      QT_ROOT: ${{ runner.temp }}/Qt
+      ANDROID_API: "34"
+      ANDROID_BUILD_TOOLS: "34.0.0"
+      ANDROID_NDK_VERSION: "26.1.10909125"
+      ANDROID_ABI: "arm64-v8a"
+
+    steps:
+      - name: Checkout Sioyek
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            python3 \
+            python3-pip \
+            perl \
+            zip \
+            unzip
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK
+        run: |
+          yes | sdkmanager --licenses
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-${ANDROID_API}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "ndk;${ANDROID_NDK_VERSION}"
+
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install Qt Android and host tools
+        run: |
+          python3 -m pip install --user --upgrade aqtinstall
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          aqt install-qt \
+            linux android \
+            "$QT_VERSION" \
+            android_arm64_v8a \
+            --autodesktop \
+            --modules qtdeclarative qtspeech qtsvg \
+            --outputdir "$QT_ROOT"
+
+          echo "QT_ANDROID=$QT_ROOT/$QT_VERSION/android_arm64_v8a" >> "$GITHUB_ENV"
+          echo "QT_HOST=$QT_ROOT/$QT_VERSION/gcc_64" >> "$GITHUB_ENV"
+
+      - name: Configure Android environment
+        run: |
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_PATH"
+
+          echo "$QT_ROOT/$QT_VERSION/android_arm64_v8a/bin" >> "$GITHUB_PATH"
+          echo "$QT_ROOT/$QT_VERSION/gcc_64/bin" >> "$GITHUB_PATH"
+
+      - name: Build MuPDF for ARM64
+        run: |
+          cd mupdf
+
+          make generate
+
+          "$ANDROID_NDK_ROOT/ndk-build" \
+            -j"$(nproc)" \
+            APP_BUILD_SCRIPT=platform/java/Android.mk \
+            APP_PROJECT_PATH=build/android \
+            APP_PLATFORM=android-21 \
+            APP_ABI=arm64-v8a \
+            APP_OPTIM=release
+
+          cd ..
+
+          MUPDF_SO="$(find mupdf -type f \
+            -path '*/arm64-v8a/libmupdf_java.so' \
+            -print -quit)"
+
+          if [ -z "$MUPDF_SO" ]; then
+            echo "ERROR: libmupdf_java.so was not generated"
+            find mupdf -name '*.so'
+            exit 1
+          fi
+
+          mkdir -p libs
+          cp "$MUPDF_SO" libs/libmupdf_java.so
+
+          echo "MuPDF library:"
+          file libs/libmupdf_java.so
+
+      - name: Install Android OpenSSL libraries
+        run: |
+          git clone --depth 1 \
+            https://github.com/KDAB/android_openssl.git \
+            "$RUNNER_TEMP/android_openssl"
+
+          OPENSSL_DIR="$RUNNER_TEMP/android_openssl/ssl_3/arm64-v8a"
+
+          test -f "$OPENSSL_DIR/libcrypto_3.so"
+          test -f "$OPENSSL_DIR/libssl_3.so"
+
+          cp "$OPENSSL_DIR/libcrypto_3.so" libs/
+          cp "$OPENSSL_DIR/libssl_3.so" libs/
+
+          ls -lh libs/
+
+      - name: Configure Sioyek with qmake
+        run: |
+          mkdir -p build-android
+          cd build-android
+
+          "$QT_ANDROID/bin/qmake" \
+            "$GITHUB_WORKSPACE/pdf_viewer_build_config.pro" \
+            -spec android-clang \
+            ANDROID_ABIS=arm64-v8a \
+            CONFIG+=release
+
+          echo "Generated deployment settings:"
+          find . -name '*deployment-settings.json' -print
+
+      - name: Compile Sioyek
+        run: |
+          cd build-android
+          make -j"$(nproc)"
+
+      - name: Package APK
+        run: |
+          SETTINGS="$(find build-android \
+            -name '*deployment-settings.json' \
+            -print -quit)"
+
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: Qt deployment settings were not generated"
+            exit 1
+          fi
+
+          "$QT_ANDROID/bin/androiddeployqt" \
+            --input "$SETTINGS" \
+            --output "$GITHUB_WORKSPACE/build-android/android-build" \
+            --android-platform "android-${ANDROID_API}" \
+            --verbose \
+            --apk "$GITHUB_WORKSPACE/sioyek-arm64.apk"
+
+          test -f sioyek-arm64.apk
+          ls -lh sioyek-arm64.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: sioyek-android-arm64
+          path: sioyek-arm64.apk
+          if-no-files-found: error
+          retention-days: 14
